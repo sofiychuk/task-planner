@@ -3,12 +3,13 @@ import { defineStore } from 'pinia'
 
 import { supabase } from '../lib/supabase'
 import { getAuthErrorMessage } from '../lib/auth-errors'
-import { buildEmailRedirectTo } from '../lib/auth-redirect'
+import { buildEmailRedirectTo, buildPasswordResetRedirectTo } from '../lib/auth-redirect'
 
 export const useAuthStore = defineStore('auth', () => {
   const session = ref(null)
   const isReady = ref(false)
   const pendingAction = ref(null)
+  const initializationError = ref('')
 
   let initPromise = null
   let subscription = null
@@ -33,15 +34,22 @@ export const useAuthStore = defineStore('auth', () => {
       subscription = data.subscription
 
       try {
+        // getSession can return an older persisted session after a failed URL
+        // exchange. Preserve the initialization error so recovery cannot
+        // accidentally change the password of that older account.
+        const result = await supabase.auth.initialize()
+        if (result.error) initializationError.value = getAuthErrorMessage(result.error)
         const { data: sessionData, error } = await supabase.auth.getSession()
 
         if (error) {
+          initializationError.value = getAuthErrorMessage(error)
           console.error('[auth] Failed to restore session:', error)
           session.value = null
         } else {
           session.value = sessionData.session ?? null
         }
       } catch (error) {
+        initializationError.value = getAuthErrorMessage(error)
         console.error('[auth] Unexpected error while restoring session:', error)
         session.value = null
       } finally {
@@ -134,6 +142,36 @@ export const useAuthStore = defineStore('auth', () => {
     })
   }
 
+  async function requestPasswordReset({ email, redirectTo }) {
+    return runAction('resetPassword', async () => {
+      const { error } = await supabase.auth.resetPasswordForEmail(String(email || '').trim(), {
+        redirectTo: buildPasswordResetRedirectTo(redirectTo),
+      })
+      if (error) {
+        return { ok: false, message: getAuthErrorMessage(error), code: error.code || '' }
+      }
+      return { ok: true }
+    })
+  }
+
+  async function updatePassword({ password }) {
+    return runAction('updatePassword', async () => {
+      const { data, error } = await supabase.auth.updateUser({ password })
+      if (error) {
+        return {
+          ok: false,
+          message: getAuthErrorMessage(error),
+          code: error.code || '',
+          sessionMissing: error.name === 'AuthSessionMissingError',
+        }
+      }
+      if (session.value && data.user) {
+        session.value = { ...session.value, user: data.user }
+      }
+      return { ok: true }
+    })
+  }
+
   async function confirmEmailToken({ tokenHash, type }) {
     return runAction('confirm', async () => {
       const { data, error } = await supabase.auth.verifyOtp({
@@ -187,12 +225,15 @@ export const useAuthStore = defineStore('auth', () => {
     user,
     isReady,
     pendingAction,
+    initializationError,
     isAuthenticated,
     isBusy,
     initialize,
     signIn,
     signUp,
     resendConfirmation,
+    requestPasswordReset,
+    updatePassword,
     confirmEmailToken,
     signOut,
   }

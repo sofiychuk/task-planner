@@ -1,11 +1,15 @@
-const AUTH_PATHS = /^\/(login|register|auth)(\/|\?|#|$)/
+const AUTH_PATHS = /^\/(login|register|forgot-password|auth)(\/|\?|#|$)/i
 
 let capturedState = {
   errorCode: '',
   errorDescription: '',
   tokenHash: '',
   type: '',
+  recovery: false,
+  hasSessionTokens: false,
 }
+
+let recoveryRedirectConsumed = false
 
 /**
  * Reads auth-related parameters from the current URL.
@@ -30,8 +34,14 @@ export function captureAuthUrlState() {
       search.get('error') ||
       '',
     tokenHash: search.get('token_hash') || '',
-    type: search.get('type') || '',
+    type: hash.get('type') || search.get('type') || '',
+    recovery:
+      search.get('recovery') === '1' ||
+      hash.get('type') === 'recovery' ||
+      search.get('type') === 'recovery',
+    hasSessionTokens: Boolean(hash.get('access_token')),
   }
+  recoveryRedirectConsumed = false
 
   // An error hash has no session to restore, so it is safe to clean it right away.
   if (capturedState.errorCode || capturedState.errorDescription) {
@@ -46,6 +56,23 @@ export function captureAuthUrlState() {
 
 export function getCapturedAuthState() {
   return { ...capturedState }
+}
+
+export function consumeRecoveryRedirect() {
+  if (!capturedState.recovery || recoveryRedirectConsumed) return false
+  recoveryRedirectConsumed = true
+  return true
+}
+
+export function clearCapturedAuthState() {
+  capturedState = {
+    errorCode: '',
+    errorDescription: '',
+    tokenHash: '',
+    type: '',
+    recovery: false,
+    hasSessionTokens: false,
+  }
 }
 
 /**
@@ -77,5 +104,15 @@ export function buildEmailRedirectTo(redirectPath) {
     url.searchParams.set('redirect', target)
   }
 
+  return url.toString()
+}
+
+export function buildPasswordResetRedirectTo(redirectPath) {
+  // Reuse the existing callback endpoint; no new Dashboard allowlist entry
+  // is required when the existing callback URL is allowed with query strings.
+  const target = buildEmailRedirectTo(redirectPath)
+  if (!target) return undefined
+  const url = new URL(target)
+  url.searchParams.set('recovery', '1')
   return url.toString()
 }

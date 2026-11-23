@@ -14,6 +14,8 @@ const AUTH_ERROR_MESSAGES = {
   email_address_invalid: 'Введіть коректну email-адресу.',
   validation_failed: 'Перевірте введені дані та спробуйте ще раз.',
   same_password: 'Новий пароль має відрізнятися від поточного.',
+  reauthentication_needed: 'Запросіть нове посилання для відновлення пароля та спробуйте ще раз.',
+  reauthentication_not_valid: LINK_MESSAGE,
   otp_expired: LINK_MESSAGE,
   access_denied: LINK_MESSAGE,
   bad_code_verifier: LINK_MESSAGE,
@@ -39,6 +41,7 @@ export function isNetworkError(error) {
 export function getAuthErrorMessage(error) {
   if (!error) return GENERIC_MESSAGE
   if (isNetworkError(error)) return NETWORK_MESSAGE
+  if (error.name === 'AuthSessionMissingError') return LINK_MESSAGE
 
   const code = typeof error === 'object' ? error.code : ''
   if (code && AUTH_ERROR_MESSAGES[code]) return AUTH_ERROR_MESSAGES[code]

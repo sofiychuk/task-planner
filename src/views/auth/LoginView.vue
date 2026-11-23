@@ -42,6 +42,10 @@ const registerLink = computed(() =>
 )
 
 const isSubmitting = computed(() => auth.pendingAction === 'signIn')
+const forgotLink = computed(() => ({
+  name: 'forgot-password',
+  query: requestedRedirect.value ? { redirect: requestedRedirect.value } : {},
+}))
 const isResending = computed(() => auth.pendingAction === 'resend')
 
 watch(email, () => {
@@ -155,6 +159,12 @@ async function handleResend() {
         :disabled="isSubmitting"
         required
       />
+
+      <div class="text-right">
+        <RouterLink :to="forgotLink" class="text-sm font-medium text-blue-600 hover:text-blue-700">
+          Забули пароль?
+        </RouterLink>
+      </div>
 
       <button
         type="submit"
