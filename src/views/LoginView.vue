@@ -141,6 +141,15 @@ async function onResend() {
         />
       </div>
 
+      <div class="flex justify-end">
+        <RouterLink
+          :to="{ name: 'forgot-password', query: redirectQuery }"
+          class="text-sm font-medium text-blue-600 hover:underline"
+        >
+          Забули пароль?
+        </RouterLink>
+      </div>
+
       <button
         type="submit"
         :disabled="submitting"

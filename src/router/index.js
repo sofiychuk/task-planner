@@ -6,6 +6,8 @@ import PlannerView from '../views/PlannerView.vue'
 import SettingsView from '../views/SettingsView.vue'
 import LoginView from '../views/LoginView.vue'
 import RegisterView from '../views/RegisterView.vue'
+import ForgotPasswordView from '../views/ForgotPasswordView.vue'
+import ResetPasswordView from '../views/ResetPasswordView.vue'
 import { useAuthStore } from '../stores/auth'
 import { getSafeRedirect } from '../lib/redirect'
 
@@ -41,6 +43,20 @@ const routes = [
         meta: { guestOnly: true },
     },
     {
+        path: '/forgot-password',
+        name: 'forgot-password',
+        component: ForgotPasswordView,
+        meta: { guestOnly: true },
+    },
+    {
+        // Deliberately public: an expired/foreign recovery link must land
+        // here with a friendly "invalid link" state instead of being
+        // bounced to /login by the guard.
+        path: '/reset-password',
+        name: 'reset-password',
+        component: ResetPasswordView,
+    },
+    {
         path: '/:pathMatch(.*)*',
         redirect: '/',
     },
@@ -70,6 +86,12 @@ router.beforeEach(async (to) => {
 
         const query = { ...to.query }
 
+        // A recent password-reset request in this browser identifies the
+        // landing as a password-recovery callback. Needed because `code` may
+        // already be gone from the URL (auth-js strips it as soon as the
+        // exchange succeeds, possibly before this navigation was parsed).
+        const recoveryRequested = auth.hasRecentRecoveryRequest()
+
         // auth-js removes `code` from the URL only after a *successful* PKCE
         // exchange, so a leftover code here means the exchange failed (e.g.
         // the confirmation link was opened in a different browser). GoTrue may
@@ -83,9 +105,34 @@ router.beforeEach(async (to) => {
             delete query.error_description
 
             if (auth.isAuthenticated) {
+                // Successful exchange: either an email confirmation or a
+                // password recovery — the marker tells them apart.
+                if (recoveryRequested) {
+                    auth.clearRecoveryRequest()
+                    return { name: 'reset-password' }
+                }
                 return getSafeRedirect(query.redirect)
             }
+
+            // Failed exchange: a recovery landing gets its own message and
+            // a direct path to requesting a fresh link.
+            if (recoveryRequested) {
+                auth.clearRecoveryRequest()
+                return { name: 'forgot-password', query: { recoveryFailed: '1' } }
+            }
             return { name: 'login', query: { ...query, confirmFailed: '1' } }
+        }
+
+        // No auth params in the URL: the exchange may have completed and
+        // cleaned the URL before this navigation was parsed — the recovery
+        // marker is then the only remaining signal.
+        if (
+            recoveryRequested &&
+            auth.isAuthenticated &&
+            to.name !== 'reset-password'
+        ) {
+            auth.clearRecoveryRequest()
+            return { name: 'reset-password' }
         }
     }
 

@@ -1,4 +1,4 @@
-const BLOCKED_PATHS = ['/login', '/register']
+const BLOCKED_PATHS = ['/login', '/register', '/forgot-password']
 
 /**
  * Sanitizes a user-supplied redirect target so it can only point to a

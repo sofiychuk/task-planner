@@ -4,6 +4,70 @@ import { supabase } from '../lib/supabase'
 import { getAuthErrorMessage } from '../lib/authErrors'
 
 /**
+ * Marker written when a password-reset email is requested. The recovery
+ * link returns to `window.location.origin` (the same value `register`
+ * uses), so the URL alone cannot tell the router that a page load is a
+ * password-recovery callback: the PKCE exchange may strip `code` from the
+ * URL before vue-router parses the initial location, and the
+ * `PASSWORD_RECOVERY` event may fire before this store subscribes. A
+ * marker in localStorage (shared across tabs, survives the email round
+ * trip) is the only signal present in every case.
+ */
+const RECOVERY_REQUEST_KEY = 'planner:password-recovery-request'
+const RECOVERY_REQUEST_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
+
+/**
+ * Records that a password-reset email was requested in this browser.
+ * Never throws — with storage unavailable the flow degrades to "no marker".
+ */
+function markRecoveryRequested() {
+    try {
+        window.localStorage.setItem(
+            RECOVERY_REQUEST_KEY,
+            JSON.stringify({ at: Date.now() })
+        )
+    } catch {
+        // Ignore — marker is optional.
+    }
+}
+
+/**
+ * Whether a password-reset email was requested recently (within TTL).
+ * Expired markers are removed as a side effect.
+ *
+ * @returns {boolean}
+ */
+function hasRecentRecoveryRequest() {
+    try {
+        const raw = window.localStorage.getItem(RECOVERY_REQUEST_KEY)
+        if (!raw) {
+            return false
+        }
+        const at = JSON.parse(raw)?.at
+        if (typeof at !== 'number' || Date.now() - at > RECOVERY_REQUEST_TTL_MS) {
+            window.localStorage.removeItem(RECOVERY_REQUEST_KEY)
+            return false
+        }
+        return true
+    } catch {
+        return false
+    }
+}
+
+/**
+ * Discards the password-reset marker (consumed by the router when the
+ * recovery landing is handled, or by login/register so a later normal
+ * sign-in is never mistaken for a recovery callback).
+ */
+function clearRecoveryRequest() {
+    try {
+        window.localStorage.removeItem(RECOVERY_REQUEST_KEY)
+    } catch {
+        // Ignore — the marker expires on its own.
+    }
+}
+
+/**
  * Central authentication store. All auth state changes flow through
  * `onAuthStateChange`, which covers page reloads, silent token refresh,
  * cross-tab logout and the email-confirmation redirect landing.
@@ -83,10 +147,12 @@ export const useAuthStore = defineStore('auth', () => {
 
             // `session` is null when email confirmation is required.
             if (!data.session) {
+                clearRecoveryRequest()
                 return { ok: true, needsConfirmation: true }
             }
 
             // Session established right away (confirmation disabled on project).
+            clearRecoveryRequest()
             return { ok: true, needsConfirmation: false }
         } catch (err) {
             return { ok: false, error: getAuthErrorMessage(err) }
@@ -119,6 +185,9 @@ export const useAuthStore = defineStore('auth', () => {
                 }
             }
 
+            // A normal sign-in supersedes any pending password-reset request,
+            // so the next page load is never treated as a recovery landing.
+            clearRecoveryRequest()
             return { ok: true }
         } catch (err) {
             return { ok: false, error: getAuthErrorMessage(err) }
@@ -188,6 +257,59 @@ export const useAuthStore = defineStore('auth', () => {
         }
     }
 
+    /**
+     * Requests a password-reset email. The marker is written *before* the
+     * network call so the landing can still be recognized as a recovery
+     * callback even if the response is lost after the email was queued.
+     * Supabase does not reveal whether the address exists (anti-enumeration):
+     * `ok` only means the request was accepted.
+     *
+     * @param {string} email
+     * @returns {Promise<{ ok: boolean, error?: string }>}
+     */
+    async function requestPasswordReset(email) {
+        markRecoveryRequested()
+
+        try {
+            const { error } = await supabase.auth.resetPasswordForEmail(email, {
+                // Same value as `register` — works with whatever is already
+                // allowed in the project's Redirect URLs list.
+                emailRedirectTo: window.location.origin,
+            })
+
+            if (error) {
+                return { ok: false, error: getAuthErrorMessage(error) }
+            }
+
+            return { ok: true }
+        } catch (err) {
+            return { ok: false, error: getAuthErrorMessage(err) }
+        }
+    }
+
+    /**
+     * Sets a new password for the currently signed-in user. Used from the
+     * password-recovery page, where the recovery link has already
+     * established a session via the PKCE exchange.
+     *
+     * @param {string} password
+     * @returns {Promise<{ ok: boolean, error?: string }>}
+     */
+    async function updatePassword(password) {
+        try {
+            const { error } = await supabase.auth.updateUser({ password })
+
+            if (error) {
+                return { ok: false, error: getAuthErrorMessage(error) }
+            }
+
+            clearRecoveryRequest()
+            return { ok: true }
+        } catch (err) {
+            return { ok: false, error: getAuthErrorMessage(err) }
+        }
+    }
+
     return {
         user,
         session,
@@ -198,5 +320,9 @@ export const useAuthStore = defineStore('auth', () => {
         login,
         logout,
         resendConfirmation,
+        requestPasswordReset,
+        updatePassword,
+        hasRecentRecoveryRequest,
+        clearRecoveryRequest,
     }
 })

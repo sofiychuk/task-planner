@@ -56,10 +56,38 @@ export function getAuthErrorMessage(error) {
 
     if (
         /code verifier/i.test(message) ||
-        /code challenge/i.test(message) ||
+        /code[ _]challenge/i.test(message) ||
         /flow type/i.test(message)
     ) {
         return 'Не вдалося завершити підтвердження. Відкрийте лист підтвердження в тому самому браузері, у якому реєструвалися.'
+    }
+
+    if (
+        code === 'session_expired' ||
+        code === 'session_not_found' ||
+        code === 'refresh_token_not_found' ||
+        /session .*expired/i.test(message) ||
+        /session not found/i.test(message) ||
+        /refresh token not found/i.test(message) ||
+        /auth session missing/i.test(message)
+    ) {
+        return 'Посилання для відновлення застаріло або сесію завершено. Запросіть новий лист.'
+    }
+
+    if (
+        code === 'same_password' ||
+        /new password should be different/i.test(message) ||
+        /password should be different/i.test(message)
+    ) {
+        return 'Новий пароль має відрізнятися від поточного.'
+    }
+
+    if (code === 'user_not_found' || /user not found/i.test(message)) {
+        return 'Користувача з таким email не знайдено.'
+    }
+
+    if (/invalid redirect/i.test(message)) {
+        return 'Не вдалося підготувати лист відновлення. Спробуйте пізніше.'
     }
 
     if (code === 'validation_failed') {
