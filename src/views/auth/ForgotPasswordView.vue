@@ -7,12 +7,14 @@ import AuthCard from '../../components/auth/AuthCard.vue'
 import FormField from '../../components/auth/FormField.vue'
 import AppSpinner from '../../components/ui/AppSpinner.vue'
 import { useResendCooldown } from '../../composables/useResendCooldown'
+import { useActiveView } from '../../composables/useActiveView'
 import { getSafeRedirectPath } from '../../lib/auth-redirect'
 import { validateEmail } from '../../lib/validation'
 import { useAuthStore } from '../../stores/auth'
 
 const auth = useAuthStore()
 const route = useRoute()
+const isActive = useActiveView()
 const email = ref('')
 const emailError = ref('')
 const formError = ref('')
@@ -45,6 +47,7 @@ async function handleSubmit() {
     email: targetEmail,
     redirectTo: redirectTarget.value,
   })
+  if (!isActive()) return
   if (!result.ok) {
     formError.value = result.message
     return
@@ -59,6 +62,7 @@ async function editEmail() {
   sent.value = false
   formError.value = ''
   await nextTick()
+  if (!isActive()) return
   document.getElementById('forgot-email')?.focus()
 }
 </script>

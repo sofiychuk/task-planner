@@ -3,7 +3,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import DashboardView from '../views/DashboardView.vue'
 import PlannerView from '../views/PlannerView.vue'
 import SettingsView from '../views/SettingsView.vue'
-import { consumeRecoveryRedirect, getSafeRedirectPath } from '../lib/auth-redirect'
+import { consumeRecoveryRedirect, getSafeRedirectPath, stripAuthParameters } from '../lib/auth-redirect'
 import { pinia } from '../stores'
 import { useAuthStore } from '../stores/auth'
 
@@ -104,10 +104,18 @@ router.beforeEach(async (to) => {
         return { name: 'reset-password', query: redirect === '/' ? {} : { redirect }, replace: true }
     }
 
+    // Also fail closed for credential-bearing SPA navigations. Email links
+    // are captured at page startup; never leave later credentials in history.
+    const cleanPath = stripAuthParameters(to.fullPath, true)
+    if (cleanPath !== to.fullPath) {
+        const clean = router.resolve(cleanPath)
+        return { path: clean.path, query: clean.query, hash: clean.hash, replace: true }
+    }
+
     if (to.meta.requiresAuth && !auth.isAuthenticated) {
         return {
             name: 'login',
-            query: { redirect: to.fullPath },
+            query: { redirect: getSafeRedirectPath(to.fullPath) },
         }
     }
 

@@ -105,6 +105,7 @@ test('store actions use Supabase recovery APIs and preserve existing auth', asyn
         return { error: null }
       },
       getSession: async () => ({ data: { session }, error: null }),
+      getUser: async () => ({ data: { user: session.user }, error: null }),
       resetPasswordForEmail: async (...args) => {
         resetArgs = args
         return { error: null }
@@ -121,11 +122,16 @@ test('store actions use Supabase recovery APIs and preserve existing auth', asyn
     },
   }
   globalThis.__recoveryTestSupabase = mock
+  globalThis.__recoveryTestUpdate = async ({ password }) => {
+    updateArgs = { password }
+    return { error: updateError }
+  }
   const storeSource = (await readFile(new URL('../src/stores/auth.js', import.meta.url), 'utf8'))
     .replace("from 'vue'", `from '${import.meta.resolve('vue')}'`)
     .replace("from 'pinia'", `from '${import.meta.resolve('pinia')}'`)
-    .replace("import { supabase } from '../lib/supabase'", 'const supabase = globalThis.__recoveryTestSupabase')
+    .replace("import { supabase, updatePasswordForAccount } from '../lib/supabase'", 'const supabase = globalThis.__recoveryTestSupabase; const updatePasswordForAccount = globalThis.__recoveryTestUpdate')
     .replace("'../lib/auth-errors'", `'${new URL('../src/lib/auth-errors.js', import.meta.url).href}'`)
+    .replace("'../lib/auth-diagnostics'", `'${new URL('../src/lib/auth-diagnostics.js', import.meta.url).href}'`)
     .replace("'../lib/auth-redirect'", `'data:text/javascript;base64,${Buffer.from(helperSource).toString('base64')}'`)
     .replaceAll('import.meta.hot', 'false')
   const { useAuthStore } = await import(`data:text/javascript;base64,${Buffer.from(storeSource).toString('base64')}`)
@@ -140,11 +146,11 @@ test('store actions use Supabase recovery APIs and preserve existing auth', asyn
   assert.equal(resetArgs[0], 'user@example.com')
   assert.equal(new URL(resetArgs[1].redirectTo).searchParams.get('recovery'), '1')
   assert.equal(auth.pendingAction, null)
-  assert.equal((await auth.updatePassword({ password: 'new-password' })).ok, true)
+  assert.equal((await auth.updatePassword({ password: 'new-password', expectedUserId: session.user.id })).ok, true)
   assert.deepEqual(updateArgs, { password: 'new-password' })
-  assert.equal(auth.user.updated, true)
+  assert.equal(auth.user.id, session.user.id)
   updateError = { code: 'same_password' }
-  assert.equal((await auth.updatePassword({ password: 'new-password' })).code, 'same_password')
+  assert.equal((await auth.updatePassword({ password: 'new-password', expectedUserId: session.user.id })).code, 'same_password')
   assert.equal(auth.isBusy, false)
   assert.equal((await auth.signIn({ email: 'user@example.com', password: 'password' })).ok, true)
   assert.equal((await auth.signUp({ email: 'user@example.com', password: 'password' })).needsConfirmation, true)
@@ -178,4 +184,5 @@ test('store actions use Supabase recovery APIs and preserve existing auth', asyn
   assert.match(result.message, /інтернетом/)
   assert.equal(auth.isBusy, false)
   delete globalThis.__recoveryTestSupabase
+  delete globalThis.__recoveryTestUpdate
 })

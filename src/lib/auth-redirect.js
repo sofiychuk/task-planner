@@ -1,4 +1,10 @@
 const AUTH_PATHS = /^\/(login|register|forgot-password|auth)(\/|\?|#|$)/i
+const AUTH_PARAMETERS = [
+  'access_token', 'refresh_token', 'provider_token', 'provider_refresh_token',
+  'token_hash', 'token', 'code', 'expires_in', 'expires_at', 'token_type',
+  'error', 'error_code', 'error_description', 'type', 'recovery',
+]
+let sessionCredentials = null
 
 let capturedState = {
   errorCode: '',
@@ -13,8 +19,8 @@ let recoveryRedirectConsumed = false
 
 /**
  * Reads auth-related parameters from the current URL.
- * Must run before the Supabase client is created, because supabase-js
- * consumes and may remove the implicit-flow hash.
+ * Runs before both client and router creation. The SDK must NOT also consume
+ * the URL: changing location.hash would create a token-bearing history entry.
  */
 export function captureAuthUrlState() {
   if (typeof window === 'undefined') return
@@ -24,6 +30,10 @@ export function captureAuthUrlState() {
     ? window.location.hash.slice(1)
     : window.location.hash
   const hash = new URLSearchParams(rawHash)
+  const parameter = (name) => hash.get(name) || search.get(name) || ''
+  sessionCredentials = parameter('access_token') || parameter('refresh_token')
+    ? { access_token: parameter('access_token'), refresh_token: parameter('refresh_token') }
+    : null
 
   capturedState = {
     errorCode: hash.get('error_code') || search.get('error_code') || '',
@@ -33,25 +43,48 @@ export function captureAuthUrlState() {
       hash.get('error') ||
       search.get('error') ||
       '',
-    tokenHash: search.get('token_hash') || '',
+    tokenHash: parameter('token_hash'),
     type: hash.get('type') || search.get('type') || '',
     recovery:
       search.get('recovery') === '1' ||
       hash.get('type') === 'recovery' ||
       search.get('type') === 'recovery',
-    hasSessionTokens: Boolean(hash.get('access_token')),
+    hasSessionTokens: Boolean(sessionCredentials),
   }
   recoveryRedirectConsumed = false
 
-  // An error hash has no session to restore, so it is safe to clean it right away.
-  if (capturedState.errorCode || capturedState.errorDescription) {
-    search.delete('error')
-    search.delete('error_code')
-    search.delete('error_description')
-    const query = search.toString()
-    const cleanUrl = `${window.location.pathname}${query ? `?${query}` : ''}`
-    window.history.replaceState(window.history.state, '', cleanUrl)
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`
+  const cleanUrl = stripAuthParameters(current, true)
+  if (cleanUrl !== current) window.history.replaceState(window.history.state, '', cleanUrl)
+}
+
+export function takeSessionCredentials() {
+  const credentials = sessionCredentials
+  sessionCredentials = null
+  return credentials
+}
+
+export function stripAuthParameters(path, preserveRedirect = false) {
+  const url = new URL(path, 'https://redirect.invalid')
+  for (const name of AUTH_PARAMETERS) {
+    if (url.searchParams.has(name)) url.searchParams.delete(name)
   }
+  // Do not reinterpret ordinary anchors (e.g. #tasks) as URL parameters.
+  const hash = new URLSearchParams(url.hash.slice(1))
+  if (AUTH_PARAMETERS.some((name) => hash.has(name))) {
+    for (const name of AUTH_PARAMETERS) hash.delete(name)
+    url.hash = hash.toString()
+  }
+  // Never forward an embedded, potentially credential-bearing redirect.
+  if (url.searchParams.has('redirect')) {
+    const original = url.searchParams.get('redirect')
+    const redirect = preserveRedirect ? getSafeRedirectPath(original, '') : ''
+    if (!preserveRedirect || original !== redirect || url.searchParams.getAll('redirect').length !== 1) {
+      url.searchParams.delete('redirect')
+      if (redirect) url.searchParams.set('redirect', redirect)
+    }
+  }
+  return `${url.pathname}${url.search}${url.hash}`
 }
 
 export function getCapturedAuthState() {
@@ -65,6 +98,7 @@ export function consumeRecoveryRedirect() {
 }
 
 export function clearCapturedAuthState() {
+  sessionCredentials = null
   capturedState = {
     errorCode: '',
     errorDescription: '',
@@ -86,10 +120,13 @@ export function getSafeRedirectPath(value, fallback = '/') {
   if (!candidate.startsWith('/')) return fallback
   if (candidate.startsWith('//')) return fallback
   if (candidate.includes('\\')) return fallback
+  if (/[\u0000-\u001f\u007f]/.test(candidate)) return fallback
   if (candidate.startsWith('/login') || candidate.startsWith('/register')) return fallback
   if (AUTH_PATHS.test(candidate)) return fallback
 
-  return candidate
+  const clean = stripAuthParameters(candidate)
+  if (clean.startsWith('//') || AUTH_PATHS.test(clean)) return fallback
+  return clean
 }
 
 export function buildEmailRedirectTo(redirectPath) {

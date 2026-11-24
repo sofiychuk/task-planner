@@ -8,6 +8,7 @@ import FormField from '../../components/auth/FormField.vue'
 import PasswordField from '../../components/auth/PasswordField.vue'
 import AppSpinner from '../../components/ui/AppSpinner.vue'
 import { useResendCooldown } from '../../composables/useResendCooldown'
+import { useActiveView } from '../../composables/useActiveView'
 import { getSafeRedirectPath } from '../../lib/auth-redirect'
 import { validateEmail } from '../../lib/validation'
 import { useAuthStore } from '../../stores/auth'
@@ -15,6 +16,7 @@ import { useAuthStore } from '../../stores/auth'
 const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
+const isActive = useActiveView()
 
 const email = ref('')
 const password = ref('')
@@ -88,6 +90,7 @@ async function handleSubmit() {
   }
 
   const result = await auth.signIn({ email: trimmedEmail, password: password.value })
+  if (!isActive()) return
 
   if (!result.ok) {
     formError.value = result.message
@@ -117,6 +120,7 @@ async function handleResend() {
     email: trimmedEmail,
     redirectTo: redirectTarget.value,
   })
+  if (!isActive()) return
 
   if (!result.ok) {
     formError.value = result.message
@@ -124,7 +128,7 @@ async function handleResend() {
   }
 
   startCooldown()
-  formSuccess.value = `Лист із підтвердженням надіслано на ${trimmedEmail}.`
+  formSuccess.value = `Якщо для ${trimmedEmail} потрібне підтвердження, лист надійде протягом кількох хвилин.`
 }
 </script>
 

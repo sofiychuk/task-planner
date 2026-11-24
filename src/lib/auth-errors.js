@@ -5,8 +5,8 @@ const LINK_MESSAGE = 'Посилання недійсне або простро�
 const AUTH_ERROR_MESSAGES = {
   invalid_credentials: 'Невірний email або пароль.',
   email_not_confirmed: 'Email ще не підтверджено. Перевірте пошту або надішліть лист ще раз.',
-  user_already_exists: 'Акаунт з таким email вже існує. Увійдіть або відновіть пароль.',
-  email_exists: 'Акаунт з таким email вже існує. Увійдіть або відновіть пароль.',
+  user_already_exists: 'Не вдалося завершити дію. Спробуйте увійти або відновити пароль.',
+  email_exists: 'Не вдалося завершити дію. Спробуйте увійти або відновити пароль.',
   weak_password: 'Пароль занадто слабкий. Використайте щонайменше 8 символів.',
   over_email_send_rate_limit: 'Забагато листів. Спробуйте ще раз через кілька хвилин.',
   over_request_rate_limit: 'Забагато спроб. Зачекайте трохи і спробуйте знову.',
@@ -23,6 +23,12 @@ const AUTH_ERROR_MESSAGES = {
   refresh_token_not_found: 'Сесія завершилася. Увійдіть знову.',
   session_expired: 'Сесія завершилася. Увійдіть знову.',
   captcha_failed: 'Не вдалося пройти перевірку. Оновіть сторінку і спробуйте ще раз.',
+  account_changed: 'Акаунт змінився. Відкрийте посилання для потрібного акаунта ще раз.',
+}
+
+export function isAccountExistenceError(error) {
+  return ['user_already_exists', 'email_exists', 'user_not_found'].includes(error?.code) ||
+    /user already registered|user not found/i.test(error?.message || '')
 }
 
 export function isNetworkError(error) {

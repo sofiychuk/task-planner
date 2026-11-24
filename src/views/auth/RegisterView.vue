@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import AuthAlert from '../../components/auth/AuthAlert.vue'
@@ -8,6 +8,7 @@ import FormField from '../../components/auth/FormField.vue'
 import PasswordField from '../../components/auth/PasswordField.vue'
 import AppSpinner from '../../components/ui/AppSpinner.vue'
 import { useResendCooldown } from '../../composables/useResendCooldown'
+import { useActiveView } from '../../composables/useActiveView'
 import { getSafeRedirectPath } from '../../lib/auth-redirect'
 import {
   validateEmail,
@@ -19,10 +20,15 @@ import { useAuthStore } from '../../stores/auth'
 const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
+const isActive = useActiveView()
 
 const email = ref('')
 const password = ref('')
 const confirmation = ref('')
+onBeforeUnmount(() => {
+  password.value = ''
+  confirmation.value = ''
+})
 const fieldErrors = ref({ email: '', password: '', confirmation: '' })
 const formError = ref('')
 const registeredEmail = ref('')
@@ -106,11 +112,14 @@ async function handleSubmit() {
     password: password.value,
     redirectTo: redirectTarget.value,
   })
+  if (!isActive()) return
 
   if (!result.ok) {
     formError.value = result.message
     return
   }
+  password.value = ''
+  confirmation.value = ''
 
   if (!result.needsConfirmation) {
     await router.replace(redirectTarget.value)
@@ -131,6 +140,7 @@ async function handleResend() {
     email: registeredEmail.value,
     redirectTo: redirectTarget.value,
   })
+  if (!isActive()) return
 
   if (!result.ok) {
     formError.value = result.message
@@ -145,12 +155,12 @@ async function handleResend() {
   <AuthCard
     v-if="isRegistered"
     title="Перевірте пошту"
-    :subtitle="`Ми надіслали лист із посиланням для підтвердження на ${registeredEmail}.`"
+    :subtitle="`Якщо для ${registeredEmail} потрібне підтвердження, лист надійде протягом кількох хвилин.`"
   >
     <div class="space-y-5">
       <AuthAlert
         variant="success"
-        message="Відкрийте лист і перейдіть за посиланням, щоб активувати акаунт."
+        message="Перевірте пошту. Якщо ви вже реєструвалися, спробуйте увійти або відновити пароль."
       />
 
       <p class="text-sm leading-relaxed text-slate-600">

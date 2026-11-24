@@ -1,6 +1,6 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 
 import AuthAlert from '../../components/auth/AuthAlert.vue'
 import AuthCard from '../../components/auth/AuthCard.vue'
@@ -10,14 +10,19 @@ import { clearCapturedAuthState, getCapturedAuthState, getSafeRedirectPath } fro
 import { getAuthErrorMessage } from '../../lib/auth-errors'
 import { validatePassword, validatePasswordConfirmation } from '../../lib/validation'
 import { useAuthStore } from '../../stores/auth'
+import { useActiveView } from '../../composables/useActiveView'
 
 const auth = useAuthStore()
 const route = useRoute()
-const router = useRouter()
+const isActive = useActiveView()
 const status = ref('loading')
 const message = ref('')
 const password = ref('')
 const confirmation = ref('')
+onBeforeUnmount(() => {
+  password.value = ''
+  confirmation.value = ''
+})
 const fieldErrors = ref({ password: '', confirmation: '' })
 const formError = ref('')
 const redirectTarget = computed(() => getSafeRedirectPath(route.query.redirect))
@@ -39,6 +44,7 @@ watch(() => auth.user?.id, (id) => {
 })
 
 function fail(errorMessage) {
+  if (!isActive()) return
   password.value = ''
   confirmation.value = ''
   message.value = errorMessage
@@ -47,9 +53,12 @@ function fail(errorMessage) {
 
 async function processRecovery() {
   const captured = getCapturedAuthState()
-  await auth.initialize()
+  const initialization = auth.initialize()
+  clearCapturedAuthState()
 
   try {
+    await initialization
+    if (!isActive()) return
     if (captured.errorCode || captured.errorDescription) {
       fail(getAuthErrorMessage({ code: captured.errorCode, message: captured.errorDescription }))
       return
@@ -59,19 +68,27 @@ async function processRecovery() {
       return
     }
     // Always verify a token hash, even if another account already has a session.
+    let verifiedUserId = captured.hasSessionTokens ? auth.incomingSessionUserId : ''
     if (captured.tokenHash) {
       if (captured.type !== 'recovery') {
         fail(getAuthErrorMessage({ code: 'otp_expired' }))
         return
       }
       const result = await auth.confirmEmailToken({ tokenHash: captured.tokenHash, type: 'recovery' })
+      if (!isActive()) return
       if (!result.ok) {
         fail(result.message)
         return
       }
+      verifiedUserId = result.userId
     }
     if (!auth.isAuthenticated) {
       fail(getAuthErrorMessage({ code: 'otp_expired' }))
+      return
+    }
+    if ((captured.hasSessionTokens || captured.tokenHash) &&
+        (!verifiedUserId || auth.user.id !== verifiedUserId)) {
+      fail(getAuthErrorMessage({ code: 'account_changed' }))
       return
     }
     // Supabase recovery creates a normal session. Accept that persisted session
@@ -79,10 +96,8 @@ async function processRecovery() {
     recoveryUserId.value = auth.user.id
     recoveryEmail.value = auth.user.email || ''
     status.value = 'form'
-  } finally {
-    clearCapturedAuthState()
-    // Replace rather than push so secrets/errors are not retained in the URL.
-    await router.replace({ name: 'reset-password', query: recoveryQuery.value })
+  } catch (error) {
+    fail(getAuthErrorMessage(error))
   }
 }
 
@@ -102,10 +117,17 @@ async function handleSubmit() {
     document.getElementById(`reset-${firstInvalid}`)?.focus()
     return
   }
-  const result = await auth.updatePassword({ password: password.value })
+  const result = await auth.updatePassword({
+    password: password.value, expectedUserId: recoveryUserId.value,
+  })
+  if (!isActive()) return
+  if (auth.user?.id !== recoveryUserId.value) {
+    fail(getAuthErrorMessage({ code: 'account_changed' }))
+    return
+  }
   if (!result.ok) {
     if (result.sessionMissing || !auth.isAuthenticated ||
-        ['session_not_found', 'session_expired', 'refresh_token_not_found',
+        ['account_changed', 'session_not_found', 'session_expired', 'refresh_token_not_found',
           'reauthentication_needed', 'reauthentication_not_valid'].includes(result.code)) {
       fail(result.message)
     } else {

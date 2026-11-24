@@ -50,7 +50,7 @@ watch(
     }
 
     if (!authenticated && route.meta.requiresAuth) {
-      router.replace({ name: 'login', query: { redirect: route.fullPath } })
+      router.replace({ name: 'login', query: { redirect: getSafeRedirectPath(route.fullPath) } })
     }
   },
 )
