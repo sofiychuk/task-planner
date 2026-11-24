@@ -28,14 +28,13 @@ async function handleLogout() {
   if (isLoggingOut.value) return
 
   logoutError.value = ''
+  const userAtStart = auth.user?.id
   const result = await auth.signOut()
 
-  if (!result.ok) {
+  if (!result.ok && auth.user?.id === userAtStart) {
     logoutError.value = result.message
-    return
   }
-
-  await router.replace({ name: 'login' })
+  // The auth watcher navigates on local sign-out, not on late revocation completion.
 }
 
 // Covers session expiry, sign-out or sign-in in another tab while the page is open.

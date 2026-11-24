@@ -4,7 +4,8 @@ import { readFile } from 'node:fs/promises'
 import { reactive } from 'vue'
 import { createMemoryHistory } from 'vue-router'
 import { createClient } from '@supabase/supabase-js'
-import { updatePasswordWithToken } from '../src/lib/password-update.js'
+import { getUserWithToken, updatePasswordWithToken } from '../src/lib/password-update.js'
+import { createAuthStorage, importIncomingSession } from '../src/lib/incoming-session.js'
 import { logAuthError } from '../src/lib/auth-diagnostics.js'
 import {
   helpers, helperSource, dataModule, location, storeWith, deferred, sessionFor,
@@ -183,6 +184,9 @@ test('supported Auth HTTP password API uses explicit JWT, maps errors, and valid
       assert.equal(url, 'https://auth.example.invalid/auth/v1/user')
       assert.equal(options.method, 'PUT')
       assert.equal(options.headers.Authorization, 'Bearer synthetic-A')
+      assert.equal(options.headers.apikey, base.publishableKey)
+      assert.equal(options.headers['X-Supabase-Api-Version'], '2024-01-01')
+      assert.equal(options.redirect, 'error')
       assert.deepEqual(JSON.parse(options.body), { password: base.password })
       return new Response(JSON.stringify({ id: 'A' }))
     },
@@ -446,10 +450,28 @@ test('actual router guards await initialization, protect routes, sanitize redire
     await router.push('/auth/callback?token_hash=synthetic&type=signup')
     assert.equal(router.currentRoute.value.name, 'auth-callback')
     assert.doesNotMatch(router.currentRoute.value.fullPath, /synthetic|token_hash/)
+    await router.push({ path: '/planner', query: { label: "Sam's", filter: ['one', 'two'] }, hash: '#tasks' })
+    assert.equal(router.currentRoute.value.query.label, "Sam's")
+    assert.deepEqual(router.currentRoute.value.query.filter, ['one', 'two'])
+    assert.equal(router.currentRoute.value.hash, '#tasks')
+    await router.push("/planner?label=Sam's&access_token=synthetic#tasks&refresh_token=synthetic")
+    assert.equal(router.currentRoute.value.fullPath, "/planner?label=Sam's#tasks")
+    for (const path of [
+      '/auth/callback?recovery=1&code=synthetic',
+      '/auth/reset-password?refresh_token=synthetic',
+      '/auth/callback?recovery=1&token_hash=synthetic&type=recovery',
+    ]) {
+      await router.push('/planner')
+      await router.push(path)
+      assert.equal(router.currentRoute.value.name, 'reset-password')
+      assert.deepEqual(router.currentRoute.value.query, { invalidRecovery: '1' })
+      assert.doesNotMatch(router.currentRoute.value.fullPath, /synthetic|code=|token/)
+    }
     await router.push('/planner')
     location('/auth/callback?recovery=1&token_hash=synthetic&type=recovery')
     await router.push('/auth/callback')
     assert.equal(router.currentRoute.value.name, 'reset-password')
+    assert.deepEqual(router.currentRoute.value.query, { recoveryAttempt: '1' })
     assert.ok(initialized >= 3)
   } finally {
     delete globalThis.__routerAuth
@@ -636,4 +658,320 @@ test('password token snapshot remains immutable if the returned session object i
   verification.resolve({ data: { user: sessionFor('A').user }, error: null })
   assert.equal((await pending).ok, true)
   assert.equal(sent, 'synthetic-A')
+})
+
+const authUrl = 'https://auth.example.invalid'
+const publishableKey = 'synthetic-public'
+const storageKey = 'planner-synthetic-auth'
+const bearer = (id, expiresIn = 3600) => `${Buffer.from('{"alg":"HS256"}').toString('base64url')}.${Buffer.from(JSON.stringify({
+  sub: id, exp: Math.floor(Date.now() / 1000) + expiresIn,
+})).toString('base64url')}.c3ludGhldGlj`
+const credentialsFor = (id, expiresIn) => ({
+  access_token: bearer(id, expiresIn), refresh_token: `synthetic-refresh-${id}`,
+})
+const authResponse = (body, status = 200) => new Response(JSON.stringify(body), {
+  status, headers: { 'Content-Type': 'application/json', 'X-Supabase-Api-Version': '2024-01-01' },
+})
+const sharedClient = (storage, fetch) => createClient(authUrl, publishableKey, {
+  auth: { storage, storageKey, persistSession: true, autoRefreshToken: false, detectSessionInUrl: false },
+  global: { fetch },
+})
+
+test('A1: an explicit session_not_found reply cannot clear a newer SDK session during password verification', async () => {
+  location('/')
+  const lookup = deferred()
+  const response = deferred()
+  const storage = createAuthStorage()
+  const client = sharedClient(storage, async (_url, options) =>
+    authResponse(options.headers.Authorization === `Bearer ${a.access_token}` ? { id: 'A' } : { id: 'B' }))
+  const a = credentialsFor('A')
+  const b = credentialsFor('B')
+  const events = []
+  client.auth.onAuthStateChange(event => { events.push(event) })
+  try {
+    assert.equal((await client.auth.setSession(a)).error, null)
+    const auth = await storeWith(client, async () => assert.fail('Verification must prevent a mutation'), {
+      verifyPasswordAccount: options => getUserWithToken({
+        ...options, supabaseUrl: authUrl, publishableKey,
+        fetchImpl: async (url, request) => {
+          assert.equal(url, `${authUrl}/auth/v1/user`)
+          assert.equal(request.method, 'GET')
+          assert.equal(request.headers.Authorization, `Bearer ${a.access_token}`)
+          assert.equal(request.cache, 'no-store')
+          lookup.resolve()
+          return response.promise
+        },
+      }),
+    })
+    await auth.initialize()
+    const pending = auth.updatePassword({ expectedUserId: 'A', password: 'synthetic' })
+    await lookup.promise
+    assert.equal((await client.auth.setSession(b)).error, null)
+    response.resolve(authResponse({ code: 'session_not_found' }, 403))
+    assert.equal((await pending).code, 'account_changed')
+    assert.equal(auth.user.id, 'B')
+    assert.equal((await client.auth.getSession()).data.session.user.id, 'B')
+    assert.ok(!events.includes('SIGNED_OUT'))
+  } finally {
+    await client.auth.dispose()
+  }
+})
+
+test('A1: rejected implicit exchanges exercise real SDK lookup and refresh errors without touching a newer account', async () => {
+  const storage = createAuthStorage()
+  const client = sharedClient(storage, async (_url, options) =>
+    authResponse(options.headers.Authorization === `Bearer ${a.access_token}` ? { id: 'A' } : { id: 'B' }))
+  const a = credentialsFor('A')
+  const b = credentialsFor('B')
+  const oldLink = credentialsFor('old')
+  const events = []
+  client.auth.onAuthStateChange(event => { events.push(event) })
+  try {
+    assert.equal((await client.auth.setSession(a)).error, null)
+    const lookup = deferred()
+    const response = deferred()
+    location(`/auth/callback?recovery=1#access_token=${oldLink.access_token}&refresh_token=${oldLink.refresh_token}&type=recovery`)
+    const auth = await storeWith(client, undefined, {
+      establishIncomingSession: credentials => importIncomingSession({
+        storage, storageKey, credentials, supabaseUrl: authUrl, publishableKey,
+        fetchImpl: async (url, request) => {
+          assert.equal(url, `${authUrl}/auth/v1/user`)
+          assert.equal(request.headers.Authorization, `Bearer ${oldLink.access_token}`)
+          lookup.resolve()
+          return response.promise
+        },
+      }),
+    })
+    const boot = auth.initialize()
+    await lookup.promise
+    assert.equal((await client.auth.setSession(b)).error, null)
+    const newer = storage.getItem(storageKey)
+    response.resolve(authResponse({ code: 'session_not_found' }, 403))
+    await boot
+    assert.ok(auth.initializationError)
+    assert.equal(auth.incomingSessionUserId, '')
+    assert.equal(auth.user.id, 'B')
+    assert.equal(storage.getItem(storageKey), newer)
+
+    const expired = await importIncomingSession({
+      storage, storageKey, credentials: credentialsFor('expired', -60), supabaseUrl: authUrl, publishableKey,
+      fetchImpl: async url => {
+        assert.equal(url, `${authUrl}/auth/v1/token?grant_type=refresh_token`)
+        return authResponse({ code: 'refresh_token_not_found' }, 400)
+      },
+    })
+    assert.equal(expired.error.code, 'refresh_token_not_found')
+    assert.equal(storage.getItem(storageKey), newer)
+    assert.ok(!events.includes('SIGNED_OUT'))
+    helpers.clearCapturedAuthState()
+  } finally {
+    await client.auth.dispose()
+  }
+})
+
+test('A1: successful isolated exchange can bootstrap the shared SDK, but does not overwrite an intervening change', async () => {
+  location('/')
+  const storage = createAuthStorage()
+  const options = { storage, storageKey, supabaseUrl: authUrl, publishableKey, credentials: credentialsFor('B') }
+  const entered = deferred()
+  const response = deferred()
+  const pending = importIncomingSession({
+    ...options,
+    fetchImpl: async () => { entered.resolve(); return response.promise },
+  })
+  await entered.promise
+  storage.setItem(storageKey, 'newer session')
+  response.resolve(authResponse({ id: 'B' }))
+  assert.equal((await pending).error.code, 'account_changed')
+  assert.equal(storage.getItem(storageKey), 'newer session')
+
+  storage.removeItem(storageKey)
+  let refreshes = 0
+  const result = await importIncomingSession({
+    ...options,
+    credentials: credentialsFor('B', -60),
+    fetchImpl: async url => {
+      refreshes++
+      assert.equal(url, `${authUrl}/auth/v1/token?grant_type=refresh_token`)
+      return authResponse({ ...options.credentials, user: { id: 'B' }, expires_in: 3600, token_type: 'bearer' })
+    },
+  })
+  assert.deepEqual(result, { userId: 'B', error: null })
+  const client = sharedClient(storage, async () => assert.fail('The shared SDK must not re-exchange the link'))
+  try {
+    assert.equal((await client.auth.getSession()).data.session.user.id, 'B')
+    assert.equal(refreshes, 1)
+  } finally {
+    await client.auth.dispose()
+  }
+})
+
+test('A1: SDK startup broadcasts a successfully imported session to an existing client', { timeout: 3000 }, async () => {
+  location('/auth/callback')
+  // Enter the actual SDK browser branch, using Node's BroadcastChannel and
+  // synthetic browser globals. Native browser storage and events are separate.
+  globalThis.document = { visibilityState: 'hidden' }
+  const storage = createAuthStorage()
+  const existing = sharedClient(storage, async () => authResponse({ id: 'A' }))
+  let next
+  try {
+    assert.equal((await existing.auth.setSession(credentialsFor('A'))).error, null)
+    const received = deferred()
+    existing.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_IN' && session?.user?.id === 'B') received.resolve()
+    })
+    const result = await importIncomingSession({
+      storage, storageKey, credentials: credentialsFor('B'), supabaseUrl: authUrl, publishableKey,
+      fetchImpl: async () => authResponse({ id: 'B' }),
+    })
+    assert.equal(result.userId, 'B')
+    next = sharedClient(storage, async () => assert.fail('The shared SDK must not re-exchange the link'))
+    assert.equal((await next.auth.getSession()).data.session.user.id, 'B')
+    await received.promise
+    assert.equal((await existing.auth.getSession()).data.session.user.id, 'B')
+  } finally {
+    await next?.auth.dispose()
+    await existing.auth.dispose()
+    delete globalThis.document
+  }
+})
+
+test('A2: actual SDK logout completion neither overwrites a newer sign-in nor kicks it back to login', async () => {
+  location('/')
+  const entered = deferred()
+  const revoke = deferred()
+  const a = credentialsFor('A')
+  const b = credentialsFor('B')
+  const client = sharedClient(createAuthStorage(), async (url, request) => {
+    if (String(url).includes('/logout')) {
+      entered.resolve()
+      return revoke.promise
+    }
+    return authResponse(request.headers.Authorization === `Bearer ${a.access_token}` ? { id: 'A' } : { id: 'B' })
+  })
+  try {
+    assert.equal((await client.auth.setSession(a)).error, null)
+    const auth = await storeWith(client)
+    await auth.initialize()
+    const route = reactive({ meta: { requiresAuth: true }, fullPath: '/planner', query: {} })
+    const view = await mountView('App', auth, ['handleLogout'], { useRoute: () => route })
+    try {
+      const pending = view.state.handleLogout()
+      await entered.promise
+      await flush()
+      assert.equal(auth.user, null)
+      assert.equal(view.navigations.length, 1)
+      assert.equal(view.navigations[0].name, 'login')
+      assert.equal((await client.auth.setSession(b)).error, null)
+      assert.equal(auth.user.id, 'B')
+      revoke.resolve(new Response(null, { status: 204 }))
+      await pending
+      await flush()
+      assert.equal(view.navigations.length, 1)
+      assert.equal(auth.user.id, 'B')
+      assert.equal((await client.auth.getSession()).data.session.user.id, 'B')
+    } finally {
+      view.unmount()
+    }
+  } finally {
+    await client.auth.dispose()
+  }
+})
+
+test('A2: failed revocation does not read a newer session after observing local sign-out', async () => {
+  location('/')
+  const mock = authMock()
+  const revoke = deferred()
+  mock.auth.signOut = () => {
+    mock.emit(null)
+    return revoke.promise
+  }
+  const auth = await storeWith(mock)
+  await auth.initialize()
+  mock.auth.getSession = async () => assert.fail('Revocation of A must not read or refresh B')
+  const pending = auth.signOut()
+  mock.emit(sessionFor('B'))
+  revoke.resolve({ error: { name: 'AuthRetryableFetchError' } })
+  assert.equal((await pending).ok, true)
+  assert.equal(auth.user.id, 'B')
+})
+
+test('A3: malformed and unsupported recovery never fall back to A, including after address cleanup and reload', async () => {
+  for (const path of [
+    '/auth/callback?recovery=1',
+    '/auth/callback?recovery=1&code=synthetic&sb_flow_id=synthetic',
+    '/auth/reset-password?access_token=&refresh_token=',
+    '/auth/reset-password?token_hash=synthetic&type=signup',
+    '/auth/reset-password?access_token=synthetic#refresh_token=synthetic&type=recovery',
+    '/auth/reset-password#?access_token=synthetic&refresh_token=synthetic&type=recovery&error=denied',
+    '/auth/reset-password?recoveryAttempt=1',
+    '/auth/reset-password?invalidRecovery=1',
+  ]) {
+    location(path)
+    const route = { query: Object.fromEntries(window.location.searchParams) }
+    assert.doesNotMatch(window.location.href, /synthetic|code=|access_token|refresh_token|token_hash/)
+    const auth = await storeWith(authMock(), undefined, {
+      establishIncomingSession: () => assert.fail('Malformed link must not be exchanged'),
+    })
+    const view = await mountView('ResetPasswordView', auth, ['status', 'recoveryUserId'], { useRoute: () => route })
+    await flush()
+    assert.equal(view.state.status.value, 'error', path)
+    assert.equal(view.state.recoveryUserId.value, '', path)
+    assert.equal(auth.user.id, 'A')
+    assert.equal(view.navigations.length, 0, path)
+    view.unmount()
+  }
+})
+
+test('A3: a verified recovery clears its pending marker; a subsequent clean reset can reload', async () => {
+  location('/auth/reset-password?token_hash=synthetic&type=recovery&redirect=%2Fplanner&x=1#tasks')
+  const query = Object.fromEntries(window.location.searchParams)
+  assert.equal(query.recoveryAttempt, '1')
+  const auth = reactive({
+    isAuthenticated: true, user: sessionFor('A').user,
+    initialize: async () => {},
+    confirmEmailToken: async () => {
+      auth.user = sessionFor('B').user
+      return { ok: true, userId: 'B' }
+    },
+  })
+  const view = await mountView('ResetPasswordView', auth, ['status', 'recoveryUserId'], {
+    useRoute: () => ({ query, hash: window.location.hash }),
+  })
+  await flush()
+  assert.equal(view.state.status.value, 'form')
+  assert.equal(view.state.recoveryUserId.value, 'B')
+  assert.deepEqual(view.navigations, [{ name: 'reset-password', query: { redirect: '/planner', x: '1' }, hash: '#tasks' }])
+  view.unmount()
+
+  location('/auth/reset-password?redirect=%2Fplanner')
+  const reload = await mountView('ResetPasswordView', auth, ['status', 'recoveryUserId'])
+  await flush()
+  assert.equal(reload.state.status.value, 'form')
+  assert.equal(reload.state.recoveryUserId.value, 'B')
+  reload.unmount()
+})
+
+test('A5: password API retains status for malformed bodies and rejects invalid success shapes', async () => {
+  const options = { supabaseUrl: authUrl, publishableKey, accessToken: 'synthetic-A', expectedUserId: 'A', password: 'synthetic' }
+  for (const [body, status, code] of [
+    [null, 401, ''], ['<html>unavailable</html>', 502, ''], ['null', 429, 'over_request_rate_limit'],
+    ['[]', 403, ''], ['{"code":{},"msg":42}', 403, ''], [null, 204, undefined],
+    ['null', 200, undefined], ['{"user":{}}', 200, undefined],
+  ]) {
+    const result = await updatePasswordWithToken({ ...options, fetchImpl: async () => new Response(body, { status }) })
+    assert.equal(result.error.status, status)
+    assert.equal(result.error.code, code)
+  }
+  assert.equal((await updatePasswordWithToken({
+    ...options, fetchImpl: async () => authResponse({ user: { id: 'A' } }),
+  })).error, null)
+  location('/')
+  const auth = await storeWith(authMock(), args => updatePasswordWithToken({
+    ...options, ...args, fetchImpl: async () => new Response(null, { status: 401 }),
+  }))
+  const result = await auth.updatePassword({ expectedUserId: 'A', password: 'synthetic' })
+  assert.equal(result.ok, false)
+  assert.equal(result.sessionMissing, true)
+  assert.match(result.message, /Сесія/)
 })

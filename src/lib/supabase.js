@@ -1,7 +1,8 @@
 import { createClient } from '@supabase/supabase-js'
 
 import { captureAuthUrlState } from './auth-redirect'
-import { updatePasswordWithToken } from './password-update'
+import { getUserWithToken, updatePasswordWithToken } from './password-update'
+import { createAuthStorage, importIncomingSession } from './incoming-session'
 
 // Clean even when configuration is missing and startup cannot continue.
 captureAuthUrlState()
@@ -15,19 +16,33 @@ if (!supabaseUrl || !supabaseKey) {
     )
 }
 
-export const supabase = createClient(supabaseUrl, supabaseKey, {
-    auth: {
-        persistSession: true,
-        autoRefreshToken: true,
-        detectSessionInUrl: false,
-        flowType: 'implicit',
-    },
-})
+// Explicitly retain the installed SDK's default key for existing sessions and tabs.
+const storageKey = `sb-${new URL(supabaseUrl).hostname.split('.')[0]}-auth-token`
+const storage = createAuthStorage()
+const authConfig = { supabaseUrl, publishableKey: supabaseKey }
+let supabase
+
+export function getSupabase() {
+    return supabase ??= createClient(supabaseUrl, supabaseKey, {
+        auth: {
+            storage,
+            storageKey,
+            persistSession: true,
+            autoRefreshToken: true,
+            detectSessionInUrl: false,
+            flowType: 'implicit',
+        },
+    })
+}
+
+export function establishIncomingSession(credentials) {
+    return importIncomingSession({ ...authConfig, storage, storageKey, credentials })
+}
+
+export function verifyPasswordAccount(options) {
+    return getUserWithToken({ ...options, ...authConfig })
+}
 
 export function updatePasswordForAccount(options) {
-    return updatePasswordWithToken({
-        ...options,
-        supabaseUrl,
-        publishableKey: supabaseKey,
-    })
+    return updatePasswordWithToken({ ...options, ...authConfig })
 }

@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import AuthAlert from '../../components/auth/AuthAlert.vue'
 import AuthCard from '../../components/auth/AuthCard.vue'
@@ -14,6 +14,7 @@ import { useActiveView } from '../../composables/useActiveView'
 
 const auth = useAuthStore()
 const route = useRoute()
+const router = useRouter()
 const isActive = useActiveView()
 const status = ref('loading')
 const message = ref('')
@@ -28,6 +29,7 @@ const formError = ref('')
 const redirectTarget = computed(() => getSafeRedirectPath(route.query.redirect))
 const recoveryQuery = computed(() => redirectTarget.value === '/' ? {} : { redirect: redirectTarget.value })
 const isSubmitting = computed(() => auth.pendingAction === 'updatePassword')
+const isInvalidNavigation = computed(() => route.query.invalidRecovery === '1')
 // Bind the form to the account that was verified, not a subsequent cross-tab login.
 const recoveryUserId = ref('')
 const recoveryEmail = ref('')
@@ -51,6 +53,10 @@ function fail(errorMessage) {
   status.value = 'error'
 }
 
+watch(isInvalidNavigation, (invalid) => {
+  if (invalid) fail(getAuthErrorMessage({ code: 'otp_expired' }))
+})
+
 async function processRecovery() {
   const captured = getCapturedAuthState()
   const initialization = auth.initialize()
@@ -61,6 +67,12 @@ async function processRecovery() {
     if (!isActive()) return
     if (captured.errorCode || captured.errorDescription) {
       fail(getAuthErrorMessage({ code: captured.errorCode, message: captured.errorDescription }))
+      return
+    }
+    if (isInvalidNavigation.value || captured.invalidAttempt ||
+        (route.query.recoveryAttempt !== undefined && !captured.hasSessionTokens && !captured.tokenHash) ||
+        (captured.explicitAttempt && !captured.hasSessionTokens && !captured.tokenHash)) {
+      fail(getAuthErrorMessage({ code: 'otp_expired' }))
       return
     }
     if (captured.hasSessionTokens && auth.initializationError) {
@@ -76,6 +88,10 @@ async function processRecovery() {
       }
       const result = await auth.confirmEmailToken({ tokenHash: captured.tokenHash, type: 'recovery' })
       if (!isActive()) return
+      if (isInvalidNavigation.value) {
+        fail(getAuthErrorMessage({ code: 'otp_expired' }))
+        return
+      }
       if (!result.ok) {
         fail(result.message)
         return
@@ -91,6 +107,16 @@ async function processRecovery() {
       fail(getAuthErrorMessage({ code: 'account_changed' }))
       return
     }
+    if (route.query.recoveryAttempt !== undefined) {
+      const query = { ...route.query }
+      delete query.recoveryAttempt
+      await router.replace({ name: 'reset-password', query, ...(route.hash ? { hash: route.hash } : {}) })
+      if (!isActive()) return
+      if (isInvalidNavigation.value || auth.user?.id !== verifiedUserId) {
+        fail(getAuthErrorMessage({ code: 'account_changed' }))
+        return
+      }
+    }
     // Supabase recovery creates a normal session. Accept that persisted session
     // on reload too; Supabase remains the authority for password updates.
     recoveryUserId.value = auth.user.id
@@ -102,7 +128,7 @@ async function processRecovery() {
 }
 
 async function handleSubmit() {
-  if (auth.isBusy) return
+  if (auth.isBusy || status.value !== 'form' || isInvalidNavigation.value) return
   if (!auth.isAuthenticated || auth.user.id !== recoveryUserId.value) {
     fail(getAuthErrorMessage({ code: 'otp_expired' }))
     return
@@ -121,6 +147,7 @@ async function handleSubmit() {
     password: password.value, expectedUserId: recoveryUserId.value,
   })
   if (!isActive()) return
+  if (isInvalidNavigation.value || status.value !== 'form') return
   if (auth.user?.id !== recoveryUserId.value) {
     fail(getAuthErrorMessage({ code: 'account_changed' }))
     return

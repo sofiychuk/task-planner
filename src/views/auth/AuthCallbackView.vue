@@ -56,6 +56,7 @@ async function processCallback() {
     if (captured.errorCode || captured.errorDescription) {
       throw { code: captured.errorCode, message: captured.errorDescription }
     }
+    if (captured.invalidAttempt) throw { code: 'otp_expired' }
     if (captured.hasSessionTokens && auth.initializationError) {
       status.value = 'error'
       message.value = auth.initializationError

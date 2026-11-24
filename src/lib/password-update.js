@@ -3,33 +3,48 @@
  * Unlike auth.updateUser(), this request uses the explicitly verified JWT,
  * never reloads shared storage, never refreshes, and never persists a session.
  */
-export async function updatePasswordWithToken({
-  supabaseUrl, publishableKey, accessToken, password, expectedUserId, signal,
+async function requestUser({
+  supabaseUrl, publishableKey, accessToken, method, password, signal,
   fetchImpl = globalThis.fetch,
 }) {
-  const response = await fetchImpl(`${supabaseUrl.replace(/\/$/, '')}/auth/v1/user`, {
-    method: 'PUT',
+  const authUrl = new URL('auth/v1/user', `${supabaseUrl.replace(/\/+$/, '')}/`)
+  const response = await fetchImpl(authUrl.href, {
+    method,
     headers: {
       apikey: publishableKey,
       Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
+      'X-Supabase-Api-Version': '2024-01-01',
+      ...(method === 'PUT' ? { 'Content-Type': 'application/json' } : {}),
     },
-    body: JSON.stringify({ password }),
+    ...(method === 'PUT' ? { body: JSON.stringify({ password }) } : {}),
+    cache: 'no-store',
+    redirect: 'error',
     signal,
   })
-  const body = await response.json()
+  const body = await response.json().catch(() => null)
+  const string = (value) => typeof value === 'string' ? value : ''
   if (!response.ok) {
     return {
       error: {
-        code: body.code || body.error_code || '',
+        code: string(body?.code) || string(body?.error_code) ||
+          (response.status === 429 ? 'over_request_rate_limit' : ''),
         status: response.status,
         // Used only by the friendly error mapper; never logged verbatim.
-        message: body.msg || body.message || body.error_description || '',
+        message: string(body?.msg) || string(body?.message) || string(body?.error_description),
       },
     }
   }
-  if (body.id !== expectedUserId) {
-    return { error: { code: 'account_changed' } }
-  }
-  return { error: null }
+  const user = body?.user ?? body
+  if (typeof user?.id !== 'string' || !user.id) return { error: { status: response.status } }
+  return { data: { user }, error: null }
+}
+
+// The shared SDK's getUser(jwt) can remove the current session on session_not_found.
+export function getUserWithToken(options) {
+  return requestUser({ ...options, method: 'GET' })
+}
+
+export async function updatePasswordWithToken(options) {
+  const { data, error } = await requestUser({ ...options, method: 'PUT' })
+  return { error: error ?? (data.user.id === options.expectedUserId ? null : { code: 'account_changed' }) }
 }

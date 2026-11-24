@@ -29,14 +29,23 @@ export function location(path) {
   return entries
 }
 
-export async function storeWith(mock, update = async () => ({ error: null })) {
+export async function storeWith(mock, update = async () => ({ error: null }), overrides = {}) {
   const key = `__authTest${++moduleId}`
-  globalThis[key] = { supabase: mock, updatePasswordForAccount: update }
+  globalThis[key] = {
+    getSupabase: () => mock,
+    updatePasswordForAccount: update,
+    verifyPasswordAccount: ({ accessToken }) => mock.auth.getUser(accessToken),
+    establishIncomingSession: async credentials => {
+      const { data, error } = await mock.auth.setSession(credentials)
+      return { userId: data?.session?.user?.id, error }
+    },
+    ...overrides,
+  }
   const source = (await readFile(new URL('../src/stores/auth.js', import.meta.url), 'utf8'))
     .replace("from 'vue'", `from '${import.meta.resolve('vue')}'`)
     .replace("from 'pinia'", `from '${import.meta.resolve('pinia')}'`)
-    .replace("import { supabase, updatePasswordForAccount } from '../lib/supabase'",
-      `const { supabase, updatePasswordForAccount } = globalThis.${key}`)
+    .replace("import { establishIncomingSession, getSupabase, updatePasswordForAccount, verifyPasswordAccount } from '../lib/supabase'",
+      `const { establishIncomingSession, getSupabase, updatePasswordForAccount, verifyPasswordAccount } = globalThis.${key}`)
     .replace("'../lib/auth-errors'", `'${new URL('../src/lib/auth-errors.js', import.meta.url).href}'`)
     .replace("'../lib/auth-diagnostics'", `'${new URL('../src/lib/auth-diagnostics.js', import.meta.url).href}'`)
     .replace("'../lib/auth-redirect'", `'${dataModule(helperSource)}'`)

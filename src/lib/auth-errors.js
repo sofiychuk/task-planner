@@ -50,7 +50,7 @@ export function getAuthErrorMessage(error) {
   if (error.name === 'AuthSessionMissingError') return LINK_MESSAGE
 
   const code = typeof error === 'object' ? error.code : ''
-  if (code && AUTH_ERROR_MESSAGES[code]) return AUTH_ERROR_MESSAGES[code]
+  if (typeof code === 'string' && Object.hasOwn(AUTH_ERROR_MESSAGES, code)) return AUTH_ERROR_MESSAGES[code]
 
   const message = String(error?.message || error || '')
 

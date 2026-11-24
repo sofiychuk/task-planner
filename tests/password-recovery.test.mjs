@@ -129,7 +129,7 @@ test('store actions use Supabase recovery APIs and preserve existing auth', asyn
   const storeSource = (await readFile(new URL('../src/stores/auth.js', import.meta.url), 'utf8'))
     .replace("from 'vue'", `from '${import.meta.resolve('vue')}'`)
     .replace("from 'pinia'", `from '${import.meta.resolve('pinia')}'`)
-    .replace("import { supabase, updatePasswordForAccount } from '../lib/supabase'", 'const supabase = globalThis.__recoveryTestSupabase; const updatePasswordForAccount = globalThis.__recoveryTestUpdate')
+    .replace("import { establishIncomingSession, getSupabase, updatePasswordForAccount, verifyPasswordAccount } from '../lib/supabase'", 'const getSupabase = () => globalThis.__recoveryTestSupabase; const updatePasswordForAccount = globalThis.__recoveryTestUpdate; const establishIncomingSession = () => { throw new Error("Unexpected incoming exchange") }; const verifyPasswordAccount = ({ accessToken }) => getSupabase().auth.getUser(accessToken)')
     .replace("'../lib/auth-errors'", `'${new URL('../src/lib/auth-errors.js', import.meta.url).href}'`)
     .replace("'../lib/auth-diagnostics'", `'${new URL('../src/lib/auth-diagnostics.js', import.meta.url).href}'`)
     .replace("'../lib/auth-redirect'", `'data:text/javascript;base64,${Buffer.from(helperSource).toString('base64')}'`)

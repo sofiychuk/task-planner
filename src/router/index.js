@@ -3,7 +3,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import DashboardView from '../views/DashboardView.vue'
 import PlannerView from '../views/PlannerView.vue'
 import SettingsView from '../views/SettingsView.vue'
-import { consumeRecoveryRedirect, getSafeRedirectPath, stripAuthParameters } from '../lib/auth-redirect'
+import { consumeRecoveryRedirect, getSafeRedirectPath, inspectAuthUrl, stripAuthParameters } from '../lib/auth-redirect'
 import { pinia } from '../stores'
 import { useAuthStore } from '../stores/auth'
 
@@ -97,11 +97,22 @@ router.beforeEach(async (to) => {
 
     // Recovery sessions are authenticated too: intercept before guest guards
     // and before the email-confirmation callback can redirect to the planner.
-    const recovery = consumeRecoveryRedirect()
-    if (to.name !== 'reset-password' &&
-        (recovery || (to.name === 'auth-callback' && to.query.recovery === '1'))) {
+    const { state: incoming } = inspectAuthUrl(to.fullPath)
+    if (incoming.explicitAttempt && (to.name === 'reset-password' ||
+        (to.name === 'auth-callback' && incoming.recovery))) {
+        // Do not turn discarded SPA credentials into a clean authenticated visit.
         const redirect = getSafeRedirectPath(to.query.redirect)
-        return { name: 'reset-password', query: redirect === '/' ? {} : { redirect }, replace: true }
+        return { name: 'reset-password', query: {
+            invalidRecovery: '1', ...(redirect === '/' ? {} : { redirect }),
+        }, replace: true }
+    }
+    const capturedRecovery = consumeRecoveryRedirect()
+    if ((capturedRecovery && (to.name !== 'reset-password' || to.query.recoveryAttempt !== '1')) ||
+        (to.name === 'auth-callback' && to.query.recoveryAttempt !== undefined)) {
+        const redirect = getSafeRedirectPath(to.query.redirect)
+        return { name: 'reset-password', query: {
+            recoveryAttempt: '1', ...(redirect === '/' ? {} : { redirect }),
+        }, replace: true }
     }
 
     // Also fail closed for credential-bearing SPA navigations. Email links

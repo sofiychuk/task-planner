@@ -1,10 +1,10 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 
-import { supabase, updatePasswordForAccount } from '../lib/supabase'
+import { establishIncomingSession, getSupabase, updatePasswordForAccount, verifyPasswordAccount } from '../lib/supabase'
 import { getAuthErrorMessage, isAccountExistenceError } from '../lib/auth-errors'
 import { logAuthError } from '../lib/auth-diagnostics'
-import { buildEmailRedirectTo, buildPasswordResetRedirectTo, takeSessionCredentials } from '../lib/auth-redirect'
+import { buildEmailRedirectTo, buildPasswordResetRedirectTo, getCapturedAuthState, takeSessionCredentials } from '../lib/auth-redirect'
 
 export const useAuthStore = defineStore('auth', () => {
   const session = ref(null)
@@ -16,7 +16,9 @@ export const useAuthStore = defineStore('auth', () => {
   let initPromise = null
   let subscription = null
   let identityVersion = 0
+  let signOutVersion = 0
   let passwordRequest = null
+  let supabase = null
 
   const user = computed(() => session.value?.user ?? null)
   const isAuthenticated = computed(() => Boolean(user.value))
@@ -31,44 +33,41 @@ export const useAuthStore = defineStore('auth', () => {
     if (initPromise) return initPromise
 
     initPromise = (async () => {
-      const { data } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-        // Keep this callback synchronous: awaiting Supabase calls here can deadlock.
-        if (session.value?.user?.id !== nextSession?.user?.id) {
-          identityVersion += 1
-          passwordRequest?.abort()
-        }
-        session.value = nextSession
-      })
-      subscription = data.subscription
-
       const credentials = takeSessionCredentials()
-      try {
-        // getSession can return an older persisted session after a failed URL
-        // exchange. Preserve the initialization error so recovery cannot
-        // accidentally change the password of that older account.
-        const result = await supabase.auth.initialize()
-        if (result.error) initializationError.value = getAuthErrorMessage(result.error)
-        // Credentials were removed with replaceState before router creation.
-        // setSession is supported across devices; no PKCE verifier is needed.
-        if (credentials) {
-          if (!credentials.access_token || !credentials.refresh_token) {
-            initializationError.value = getAuthErrorMessage({ code: 'otp_expired' })
-          } else {
-            const exchange = await supabase.auth.setSession(credentials)
-            if (exchange.error) initializationError.value = getAuthErrorMessage(exchange.error)
-            else if (exchange.data.session?.user?.id) {
-              incomingSessionUserId.value = exchange.data.session.user.id
-              initializationError.value = ''
-            } else initializationError.value = getAuthErrorMessage({ code: 'otp_expired' })
-          }
+      if (credentials) {
+        try {
+          const exchange = getCapturedAuthState().invalidAttempt
+            ? { error: { code: 'otp_expired' } }
+            : await establishIncomingSession(credentials)
+          if (exchange.error) initializationError.value = getAuthErrorMessage(exchange.error)
+          else incomingSessionUserId.value = exchange.userId
+        } catch (error) {
+          initializationError.value = getAuthErrorMessage(error)
+          logAuthError('initialize', error)
         }
+      }
+      try {
+        supabase = getSupabase()
+        const { data } = supabase.auth.onAuthStateChange((event, nextSession) => {
+          // Keep this callback synchronous: awaiting Supabase calls here can deadlock.
+          if (event === 'SIGNED_OUT') signOutVersion += 1
+          if (session.value?.user?.id !== nextSession?.user?.id) {
+            identityVersion += 1
+            passwordRequest?.abort()
+          }
+          session.value = nextSession
+        })
+        subscription = data.subscription
+        const result = await supabase.auth.initialize()
+        if (result.error && !initializationError.value) initializationError.value = getAuthErrorMessage(result.error)
+        const version = identityVersion
         const { data: sessionData, error } = await supabase.auth.getSession()
 
         if (error) {
-          initializationError.value = getAuthErrorMessage(error)
+          if (!initializationError.value) initializationError.value = getAuthErrorMessage(error)
           logAuthError('initialize', error)
-          session.value = null
-        } else {
+          if (version === identityVersion) session.value = null
+        } else if (version === identityVersion) {
           session.value = sessionData.session ?? null
         }
       } catch (error) {
@@ -91,6 +90,7 @@ export const useAuthStore = defineStore('auth', () => {
     pendingAction.value = action
 
     try {
+      if (!isReady.value) await initialize()
       return await task()
     } catch (error) {
       logAuthError(action, error)
@@ -190,10 +190,14 @@ export const useAuthStore = defineStore('auth', () => {
         ok: false, code: 'account_changed',
         message: getAuthErrorMessage({ code: 'account_changed' }),
       })
-      const failure = (error) => ({
-        ok: false, message: getAuthErrorMessage(error), code: error.code || '',
-        sessionMissing: error.name === 'AuthSessionMissingError' || error.status === 401,
-      })
+      const failure = (error) => {
+        const sessionMissing = error.name === 'AuthSessionMissingError' || error.status === 401 ||
+          ['bad_jwt', 'session_not_found', 'session_expired'].includes(error.code)
+        return {
+          ok: false, code: error.code || '', sessionMissing,
+          message: getAuthErrorMessage(sessionMissing ? { code: 'session_expired' } : error),
+        }
+      }
       if (!expectedUserId || user.value?.id !== expectedUserId) return changed()
       const version = identityVersion
       const controller = new AbortController()
@@ -209,7 +213,7 @@ export const useAuthStore = defineStore('auth', () => {
         const accessToken = snapshot?.access_token
         if (snapshot?.user?.id !== expectedUserId || !accessToken) return changed()
         // Verify this exact token with the server, not the local user object.
-        const verified = await supabase.auth.getUser(accessToken)
+        const verified = await verifyPasswordAccount({ accessToken, signal: controller.signal })
         if (!isCurrent()) return changed()
         if (verified.error) return failure(verified.error)
         if (verified.data.user?.id !== expectedUserId) return changed()
@@ -252,22 +256,27 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function signOut() {
     return runAction('signOut', async () => {
+      const localSignOutAtStart = signOutVersion
+      const identityAtStart = identityVersion
       const { error } = await supabase.auth.signOut({ scope: 'local' })
 
       if (error) {
-        // The server session may already be gone (expired or revoked), while
-        // the local session was cleared. Treat that as a successful sign-out.
-        const { data, error: sessionError } = await supabase.auth.getSession()
-
-        if (!sessionError && !data.session) {
-          session.value = null
-          return { ok: true }
+        // A local removal is enough. Do not inspect/refresh a newer session
+        // just because revocation of the old one failed.
+        if (signOutVersion !== localSignOutAtStart) return { ok: true }
+        if (identityVersion === identityAtStart) {
+          const { data, error: sessionError } = await supabase.auth.getSession()
+          if (!sessionError && !data.session) {
+            if (identityVersion === identityAtStart) session.value = null
+            return { ok: true }
+          }
         }
 
         return { ok: false, message: getAuthErrorMessage(error), code: error.code || '' }
       }
 
-      session.value = null
+      // The SDK emitted local SIGNED_OUT before revocation. The user may
+      // already have signed in again by the time that request completes.
       return { ok: true }
     })
   }
